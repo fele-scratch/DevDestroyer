@@ -1,0 +1,5 @@
+# Add seed URLs here (one per line)
+# Example format:
+# https://example1.fun
+# https://example2.xyz
+https://campbellcats.fun/
