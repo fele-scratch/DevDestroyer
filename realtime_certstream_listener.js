@@ -15,6 +15,7 @@
 const WebSocket = require('ws');
 const dns = require('dns').promises;
 const fs = require('fs');
+const https = require('https');
 
 class CertStreamRealTimeListener {
     constructor(config = {}) {
@@ -131,10 +132,23 @@ class CertStreamRealTimeListener {
             try {
                 const wsUrl = 'wss://certstream.calidog.io/full';
                 console.log(`[CertStream] Connecting to ${wsUrl}...`);
-                this.ws = new WebSocket(wsUrl, {
+                
+                // Proper options for ws library
+                const agent = new https.Agent({
                     rejectUnauthorized: false,  // Allow self-signed certs
-                    handshakeTimeout: 10000
+                    keepAlive: true,
+                    keepAliveMsecs: 30000
                 });
+                
+                const wsOptions = {
+                    agent: agent,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (compatible; CabalDetector/1.0)'
+                    },
+                    handshakeTimeout: 15000
+                };
+                
+                this.ws = new WebSocket(wsUrl, wsOptions);
 
                 const openTimer = setTimeout(() => {
                     if (!this.isConnected) {
@@ -142,7 +156,7 @@ class CertStreamRealTimeListener {
                         this.ws.close();
                         reject(new Error('Connection timeout'));
                     }
-                }, 15000);
+                }, 20000);
 
                 this.ws.on('open', () => {
                     clearTimeout(openTimer);
@@ -157,18 +171,21 @@ class CertStreamRealTimeListener {
 
                 this.ws.on('error', (error) => {
                     clearTimeout(openTimer);
-                    console.error('[CertStream] WebSocket error:', error.message);
+                    console.error('[CertStream] WebSocket error details:');
+                    console.error(`  Code: ${error.code}`);
+                    console.error(`  Message: ${error.message}`);
+                    console.error(`  Stack: ${error.stack}`);
                     this.isConnected = false;
                     // Don't reject immediately - let close handler take over
                 });
 
-                this.ws.on('close', () => {
+                this.ws.on('close', (code, reason) => {
                     clearTimeout(openTimer);
-                    console.log('[CertStream] Connection closed. Bot will keep listening...');
+                    console.log(`[CertStream] Connection closed (code: ${code}, reason: ${reason}). Bot will keep listening...`);
                     this.isConnected = false;
                     if (!this.isConnected) {
                         // Reject only on first attempt failure
-                        setTimeout(() => reject(new Error('CertStream connection closed')), 100);
+                        setTimeout(() => reject(new Error(`CertStream connection closed: code ${code}`)), 100);
                     }
                 });
             } catch (error) {
