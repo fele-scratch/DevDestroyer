@@ -13,6 +13,7 @@
  */
 
 const WebSocket = require('ws');
+const axios = require('axios');
 const dns = require('dns').promises;
 const fs = require('fs');
 const https = require('https');
@@ -244,15 +245,25 @@ class CertStreamRealTimeListener {
         // Extract from SAN (Subject Alternative Names)
         if (leafCert.extensions && leafCert.extensions.subjectAltName) {
             const sanList = leafCert.extensions.subjectAltName;
-            sanList.forEach(san => {
-                if (typeof san === 'string') {
-                    domains.add(san);
-                }
-            });
+            // Handle both array and string formats
+            if (Array.isArray(sanList)) {
+                sanList.forEach(san => {
+                    if (typeof san === 'string') {
+                        domains.add(san);
+                    }
+                });
+            } else if (typeof sanList === 'string') {
+                // If it's a string, try to parse DNS: entries and other patterns
+                const dnsMatches = sanList.match(/DNS:([^\s,]+)/g) || [];
+                dnsMatches.forEach(match => {
+                    const domain = match.replace('DNS:', '').trim();
+                    if (domain) domains.add(domain);
+                });
+            }
         }
 
-        // Extract from all_domains if available
-        if (leafCert.all_domains) {
+        // Extract from all_domains if available (this is most reliable)
+        if (leafCert.all_domains && Array.isArray(leafCert.all_domains)) {
             leafCert.all_domains.forEach(domain => domains.add(domain));
         }
 
@@ -399,11 +410,11 @@ class CertStreamRealTimeListener {
      * Disconnect from CertStream
      */
     disconnect() {
-        if (this.ws) {
-            this.ws.close();
-            this.isConnected = false;
-            console.log('[CertStream] Disconnected');
+        if (this._stopPolling) {
+            this._stopPolling();
         }
+        this.isConnected = false;
+        console.log('[CertStream] Disconnected');
     }
 
     /**
@@ -419,111 +430,81 @@ class CertStreamRealTimeListener {
     }
 
     /**
-     * Connect to CertStream WebSocket with ping/pong heartbeat
+     * Connect to CertStream via HTTP polling (instead of WebSocket)
      * 
-     * CRITICAL FIX: CertStream server closes connections without active heartbeat.
-     * Must implement ping/pong to keep connection alive (code 1000 timeout issue).
-     * 
-     * Exponential backoff reconnection on failure.
+     * Every 10 seconds, pull the latest certificate logs.
+     * This is more reliable than WebSocket in restricted environments.
      */
-    connect(maxRetries = 5) {
-        const WEBSOCKET_URL = 'wss://certstream.calidog.io/';
-        let retryCount = 0;
-        let retryDelay = 1000;
-        let isAlive = true;
-        let pingInterval = null;
-        let stallCheckInterval = null;
+    connect(pollInterval = 10000) {
+        const CERTSTREAM_HTTP_URL = 'https://certstream.calidog.io/example.json';
+        let lastProcessedCertIndex = -1;  // Track by cert_index for deduplication
+        let isPolling = true;
 
-        const attemptConnection = () => {
-            console.log(`[CertStream] Connecting to ${WEBSOCKET_URL}...`);
-            
-            this.ws = new WebSocket(WEBSOCKET_URL);
+        console.log(`[CertStream] Starting HTTP polling from ${CERTSTREAM_HTTP_URL}`);
+        console.log(`[CertStream] Poll interval: ${pollInterval}ms`);
+        this.isConnected = true;
 
-            this.ws.on('open', () => {
-                console.log('[CertStream] ✅ Connected to CertStream!');
-                console.log('[CertStream] Enabling heartbeat...');
-                this.isConnected = true;
-                isAlive = true;
-                retryCount = 0;
-                retryDelay = 1000;
-
-                // ===== CRITICAL: Send ping every 30 seconds =====
-                // CertStream server closes idle connections with code 1000
-                // Ping/pong keeps connection alive
-                pingInterval = setInterval(() => {
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.ping();
-                        console.log('[CertStream] 📡 Sent ping to keep connection alive');
+        const pollCertificates = async () => {
+            try {
+                const response = await axios.get(CERTSTREAM_HTTP_URL, {
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'CabalDetectionBot/1.0'
                     }
-                }, 30000);
-
-                // ===== CRITICAL: Detect stalled connections =====
-                // If server doesn't pong within 40 seconds, terminate and reconnect
-                stallCheckInterval = setInterval(() => {
-                    if (!isAlive) {
-                        console.log('[CertStream] ⚠️  Connection stalled (no pong). Terminating...');
-                        if (this.ws) this.ws.terminate();
-                    }
-                    isAlive = false; // Reset flag, expect pong to set it true
-                }, 40000);
-
-                console.log('[CertStream] Waiting for certificate events...');
-            });
-
-            this.ws.on('message', (data) => {
-                // Log first message to verify data is flowing
-                if (this.messageCount === 0) {
-                    console.log('[CertStream] ✅ First message received! Data is flowing.');
-                }
-                this.handleCertificateMessage(data).catch(error => {
-                    console.error('[CertStream] Error handling message:', error.message);
                 });
-            });
 
-            // ===== CRITICAL: Handle pong responses =====
-            // When server responds to our ping
-            this.ws.on('pong', () => {
-                isAlive = true; // Connection is healthy
-                console.log('[CertStream] 📡 Received pong - connection stable');
-            });
+                if (response.data && response.data.data) {
+                    const certData = response.data.data;
+                    const certIndex = certData.cert_index || 0;
 
-            this.ws.on('error', (error) => {
-                console.error('[CertStream] WebSocket error:', error.message);
+                    // Only process if this is a NEW certificate (not seen before)
+                    if (certIndex > lastProcessedCertIndex) {
+                        this.messageCount++;
+                        lastProcessedCertIndex = certIndex;
+
+                        // Log first certificate to confirm data flow
+                        if (this.messageCount === 1) {
+                            console.log('[CertStream] ✅ First certificate received! Data is flowing.');
+                        }
+
+                        // Process certificate
+                        const message = {
+                            message_type: 'certificate_update',
+                            data: certData
+                        };
+
+                        await this.handleCertificateMessage(JSON.stringify(message)).catch(error => {
+                            console.error('[CertStream] Error handling certificate:', error.message);
+                        });
+
+                        // Log certificate details
+                        if (certData.leaf_cert && certData.leaf_cert.all_domains) {
+                            const domains = certData.leaf_cert.all_domains.slice(0, 3).join(', ');
+                            console.log(`[CertStream] 📜 Cert #${this.messageCount}: ${domains}${certData.leaf_cert.all_domains.length > 3 ? '...' : ''}`);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('[CertStream] Poll error:', error.message);
                 this.isConnected = false;
-            });
+            }
 
-            this.ws.on('close', (code, reason) => {
-                console.log(`[CertStream] Connection closed (code: ${code}, reason: ${reason || 'none'})`);
-                this.isConnected = false;
-                isAlive = false;
-
-                // Clean up timers
-                if (pingInterval) {
-                    clearInterval(pingInterval);
-                    pingInterval = null;
-                }
-                if (stallCheckInterval) {
-                    clearInterval(stallCheckInterval);
-                    stallCheckInterval = null;
-                }
-
-                // Attempt to reconnect with exponential backoff
-                if (retryCount < maxRetries) {
-                    retryCount++;
-                    console.log(`[CertStream] Reconnection attempt ${retryCount}/${maxRetries} in ${retryDelay}ms...`);
-                    setTimeout(() => {
-                        retryDelay = Math.min(retryDelay * 2, 30000);
-                        attemptConnection();
-                    }, retryDelay);
-                } else {
-                    console.log('[CertStream] ❌ Max reconnection attempts reached.');
-                    console.log('[CertStream] Bot will continue running but monitoring is offline.');
-                }
-            });
+            // Schedule next poll
+            if (isPolling) {
+                setTimeout(pollCertificates, pollInterval);
+            }
         };
 
-        // Start connection
-        attemptConnection();
+        // Start polling immediately
+        console.log('[CertStream] ✅ HTTP polling initialized. Fetching certificates every 10 seconds...');
+        pollCertificates();
+
+        // Store reference to stop polling if needed
+        this._stopPolling = () => {
+            isPolling = false;
+            this.isConnected = false;
+            console.log('[CertStream] Polling stopped');
+        };
     }
 }
 
