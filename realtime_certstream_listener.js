@@ -419,27 +419,55 @@ class CertStreamRealTimeListener {
     }
 
     /**
-     * Connect to CertStream WebSocket with exponential backoff
-     * Matches official certstream-js implementation to ensure compatibility
+     * Connect to CertStream WebSocket with ping/pong heartbeat
+     * 
+     * CRITICAL FIX: CertStream server closes connections without active heartbeat.
+     * Must implement ping/pong to keep connection alive (code 1000 timeout issue).
+     * 
+     * Exponential backoff reconnection on failure.
      */
     connect(maxRetries = 5) {
         const WEBSOCKET_URL = 'wss://certstream.calidog.io/';
         let retryCount = 0;
-        let retryDelay = 1000; // Start at 1 second
+        let retryDelay = 1000;
+        let isAlive = true;
+        let pingInterval = null;
+        let stallCheckInterval = null;
 
         const attemptConnection = () => {
             console.log(`[CertStream] Connecting to ${WEBSOCKET_URL}...`);
             
-            // Using EXACTLY the same approach as official certstream-js library
-            // Minimal WebSocket initialization with NO special options
             this.ws = new WebSocket(WEBSOCKET_URL);
 
             this.ws.on('open', () => {
                 console.log('[CertStream] ✅ Connected to CertStream!');
-                console.log('[CertStream] Waiting for certificate events...');
+                console.log('[CertStream] Enabling heartbeat...');
                 this.isConnected = true;
-                retryCount = 0; // Reset retry counter on successful connection
-                retryDelay = 1000; // Reset retry delay
+                isAlive = true;
+                retryCount = 0;
+                retryDelay = 1000;
+
+                // ===== CRITICAL: Send ping every 30 seconds =====
+                // CertStream server closes idle connections with code 1000
+                // Ping/pong keeps connection alive
+                pingInterval = setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.ping();
+                        console.log('[CertStream] 📡 Sent ping to keep connection alive');
+                    }
+                }, 30000);
+
+                // ===== CRITICAL: Detect stalled connections =====
+                // If server doesn't pong within 40 seconds, terminate and reconnect
+                stallCheckInterval = setInterval(() => {
+                    if (!isAlive) {
+                        console.log('[CertStream] ⚠️  Connection stalled (no pong). Terminating...');
+                        if (this.ws) this.ws.terminate();
+                    }
+                    isAlive = false; // Reset flag, expect pong to set it true
+                }, 40000);
+
+                console.log('[CertStream] Waiting for certificate events...');
             });
 
             this.ws.on('message', (data) => {
@@ -452,6 +480,13 @@ class CertStreamRealTimeListener {
                 });
             });
 
+            // ===== CRITICAL: Handle pong responses =====
+            // When server responds to our ping
+            this.ws.on('pong', () => {
+                isAlive = true; // Connection is healthy
+                console.log('[CertStream] 📡 Received pong - connection stable');
+            });
+
             this.ws.on('error', (error) => {
                 console.error('[CertStream] WebSocket error:', error.message);
                 this.isConnected = false;
@@ -460,25 +495,34 @@ class CertStreamRealTimeListener {
             this.ws.on('close', (code, reason) => {
                 console.log(`[CertStream] Connection closed (code: ${code}, reason: ${reason || 'none'})`);
                 this.isConnected = false;
+                isAlive = false;
+
+                // Clean up timers
+                if (pingInterval) {
+                    clearInterval(pingInterval);
+                    pingInterval = null;
+                }
+                if (stallCheckInterval) {
+                    clearInterval(stallCheckInterval);
+                    stallCheckInterval = null;
+                }
 
                 // Attempt to reconnect with exponential backoff
                 if (retryCount < maxRetries) {
                     retryCount++;
                     console.log(`[CertStream] Reconnection attempt ${retryCount}/${maxRetries} in ${retryDelay}ms...`);
                     setTimeout(() => {
-                        retryDelay = Math.min(retryDelay * 2, 30000); // Cap at 30 seconds
+                        retryDelay = Math.min(retryDelay * 2, 30000);
                         attemptConnection();
                     }, retryDelay);
                 } else {
-                    console.log('[CertStream] ❌ Max reconnection attempts reached. Giving up.');
-                    console.log('[CertStream] The bot will continue running but monitoring is offline.');
+                    console.log('[CertStream] ❌ Max reconnection attempts reached.');
+                    console.log('[CertStream] Bot will continue running but monitoring is offline.');
                 }
             });
         };
 
-        // Start connection and return immediately
-        // Do NOT wait for connection to establish or return a Promise
-        // This matches the official library behavior
+        // Start connection
         attemptConnection();
     }
 }
