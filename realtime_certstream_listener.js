@@ -420,12 +420,9 @@ class CertStreamRealTimeListener {
 
     /**
      * Connect to CertStream WebSocket with exponential backoff
-     * This was the missing method causing the timeout issue!
-     * 
-     * Note: Using minimal WebSocket options to match official certstream-js library
-     * This avoids potential compatibility issues with certain server configurations
+     * Matches official certstream-js implementation to ensure compatibility
      */
-    async connect(maxRetries = 5) {
+    connect(maxRetries = 5) {
         const WEBSOCKET_URL = 'wss://certstream.calidog.io/';
         let retryCount = 0;
         let retryDelay = 1000; // Start at 1 second
@@ -433,8 +430,8 @@ class CertStreamRealTimeListener {
         const attemptConnection = () => {
             console.log(`[CertStream] Connecting to ${WEBSOCKET_URL}...`);
             
-            // Using minimal options like the official certstream-js library
-            // This avoids "code 1000" connection closes
+            // Using EXACTLY the same approach as official certstream-js library
+            // Minimal WebSocket initialization with NO special options
             this.ws = new WebSocket(WEBSOCKET_URL);
 
             this.ws.on('open', () => {
@@ -479,19 +476,10 @@ class CertStreamRealTimeListener {
             });
         };
 
-        return new Promise((resolve, reject) => {
-            attemptConnection();
-            
-            // Wait 3 seconds to see if connection succeeds
-            setTimeout(() => {
-                if (this.isConnected) {
-                    resolve(true);
-                } else {
-                    // Connection still pending, but resolve anyway (retries will continue)
-                    resolve(false);
-                }
-            }, 3000);
-        });
+        // Start connection and return immediately
+        // Do NOT wait for connection to establish or return a Promise
+        // This matches the official library behavior
+        attemptConnection();
     }
 }
 

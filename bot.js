@@ -115,19 +115,14 @@ class TargetedListenerBot {
         this.listener.on('cabal_detected', (alert) => this.handleCabalDetection(alert));
 
         try {
-            await this.listener.connect();
+            // connect() is now synchronous (matches official certstream-js library)
+            this.listener.connect();
             this.isRunning = true;
-            console.log('[BOT] ✅ Connected to CertStream. Waiting for matches...');
+            console.log('[BOT] ✅ Initiated CertStream connection. Waiting for matches...');
         } catch (error) {
             console.error('[BOT] ⚠️  CertStream connection failed:', error.message);
-            console.log('[BOT] ℹ️  This may be a network issue in the dev container.');
             console.log('[BOT] ℹ️  The listener will attempt to reconnect automatically.');
-            console.log('[BOT] ℹ️  In production, verify CertStream is reachable.\n');
-            
-            // Don't exit - keep the bot running for testing with manual input
-            // In production, you'd want to retry or alert
             this.isRunning = false;
-            return false;
         }
 
         return true;
