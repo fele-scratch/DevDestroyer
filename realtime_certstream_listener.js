@@ -417,6 +417,82 @@ class CertStreamRealTimeListener {
             knownDomainsTracked: this.knownCabalDomains.size
         };
     }
+
+    /**
+     * Connect to CertStream WebSocket with exponential backoff
+     * This was the missing method causing the timeout issue!
+     * 
+     * Note: Using minimal WebSocket options to match official certstream-js library
+     * This avoids potential compatibility issues with certain server configurations
+     */
+    async connect(maxRetries = 5) {
+        const WEBSOCKET_URL = 'wss://certstream.calidog.io/';
+        let retryCount = 0;
+        let retryDelay = 1000; // Start at 1 second
+
+        const attemptConnection = () => {
+            console.log(`[CertStream] Connecting to ${WEBSOCKET_URL}...`);
+            
+            // Using minimal options like the official certstream-js library
+            // This avoids "code 1000" connection closes
+            this.ws = new WebSocket(WEBSOCKET_URL);
+
+            this.ws.on('open', () => {
+                console.log('[CertStream] ✅ Connected to CertStream!');
+                console.log('[CertStream] Waiting for certificate events...');
+                this.isConnected = true;
+                retryCount = 0; // Reset retry counter on successful connection
+                retryDelay = 1000; // Reset retry delay
+            });
+
+            this.ws.on('message', (data) => {
+                // Log first message to verify data is flowing
+                if (this.messageCount === 0) {
+                    console.log('[CertStream] ✅ First message received! Data is flowing.');
+                }
+                this.handleCertificateMessage(data).catch(error => {
+                    console.error('[CertStream] Error handling message:', error.message);
+                });
+            });
+
+            this.ws.on('error', (error) => {
+                console.error('[CertStream] WebSocket error:', error.message);
+                this.isConnected = false;
+            });
+
+            this.ws.on('close', (code, reason) => {
+                console.log(`[CertStream] Connection closed (code: ${code}, reason: ${reason || 'none'})`);
+                this.isConnected = false;
+
+                // Attempt to reconnect with exponential backoff
+                if (retryCount < maxRetries) {
+                    retryCount++;
+                    console.log(`[CertStream] Reconnection attempt ${retryCount}/${maxRetries} in ${retryDelay}ms...`);
+                    setTimeout(() => {
+                        retryDelay = Math.min(retryDelay * 2, 30000); // Cap at 30 seconds
+                        attemptConnection();
+                    }, retryDelay);
+                } else {
+                    console.log('[CertStream] ❌ Max reconnection attempts reached. Giving up.');
+                    console.log('[CertStream] The bot will continue running but monitoring is offline.');
+                }
+            });
+        };
+
+        return new Promise((resolve, reject) => {
+            attemptConnection();
+            
+            // Wait 3 seconds to see if connection succeeds
+            setTimeout(() => {
+                if (this.isConnected) {
+                    resolve(true);
+                } else {
+                    // Connection still pending, but resolve anyway (retries will continue)
+                    resolve(false);
+                }
+            }, 3000);
+        });
+    }
 }
 
 module.exports = CertStreamRealTimeListener;
