@@ -1,6 +1,9 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
+const EventEmitter = require('events');
+const PythonCertStreamBridge = require('./python_certstream_bridge');
 const CertStreamRealTimeListener = require('./realtime_certstream_listener');
 const ResearchMode = require('./research_mode');
 const CabalScraper = require('./cabal_scraper');
@@ -13,10 +16,13 @@ const DETECTION_LOG = path.resolve(process.cwd(), 'cabal_detections.jsonl');
 /**
  * Targeted Listener Bot: Research Phase -> DNA Lock -> Real-Time Listener
  */
-class TargetedListenerBot {
+class TargetedListenerBot extends EventEmitter {
     constructor() {
+        super();
         this.research = new ResearchMode(WATCHLIST_FILE);
         this.listener = new CertStreamRealTimeListener();
+        this.bridge = null;
+        this.pythonProcess = null;
         this.scraper = new CabalScraper();
         this.isRunning = false;
     }
@@ -102,7 +108,7 @@ class TargetedListenerBot {
     }
 
     /**
-     * Phase 3: Real-Time Listener - Silent until match
+     * Phase 3: Real-Time Listener - Using Python Bridge with SQLite
      */
     async runRealTimeListener() {
         console.log('=========================================');
@@ -111,21 +117,85 @@ class TargetedListenerBot {
         console.log('[BOT] 🔍 Listening for certificate events...');
         console.log('[BOT] 🤐 Silent mode: Alerts only on watchlist/pattern match\n');
 
-        // Set up listener events
-        this.listener.on('cabal_detected', (alert) => this.handleCabalDetection(alert));
-
         try {
-            // connect() is now synchronous (matches official certstream-js library)
-            this.listener.connect();
+            // Start Python CertStream Monitor
+            console.log('[BOT] 🐍 Starting Python CertStream Monitor...');
+            this.startPythonMonitor();
+
+            // Create bridge to SQLite database
+            console.log('[BOT] 🌉 Initializing SQLite bridge...');
+            this.bridge = new PythonCertStreamBridge({
+                dbPath: path.join(__dirname, 'data', 'certstream.db'),
+                pollInterval: 5000,
+                onCertificate: (message) => this.processCertificateFromBridge(message)
+            });
+
+            // Connect to database
+            await this.bridge.connect();
+            console.log('[BOT] ✅ Connected to SQLite database');
+
+            // Start polling SQLite for new certificates
+            this.bridge.startPolling();
             this.isRunning = true;
-            console.log('[BOT] ✅ Initiated CertStream connection. Waiting for matches...');
+            console.log('[BOT] ✅ Initiated CertStream bridge connection. Waiting for matches...');
+            
         } catch (error) {
-            console.error('[BOT] ⚠️  CertStream connection failed:', error.message);
-            console.log('[BOT] ℹ️  The listener will attempt to reconnect automatically.');
+            console.error('[BOT] ⚠️  Bridge initialization failed:', error.message);
+            console.log('[BOT] ℹ️  The listener will attempt to recover automatically.');
             this.isRunning = false;
         }
 
         return true;
+    }
+
+    /**
+     * Start Python CertStream Monitor as subprocess
+     */
+    startPythonMonitor() {
+        try {
+            const scriptPath = path.join(__dirname, 'certstream_monitor.py');
+            
+            this.pythonProcess = spawn('python3', [scriptPath], {
+                cwd: __dirname,
+                stdio: ['inherit', 'pipe', 'pipe'],
+                detached: false
+            });
+
+            this.pythonProcess.stdout.on('data', (data) => {
+                process.stdout.write(data);
+            });
+
+            this.pythonProcess.stderr.on('data', (data) => {
+                process.stderr.write(data);
+            });
+
+            this.pythonProcess.on('error', (err) => {
+                console.error('[BOT] Python process error:', err.message);
+            });
+
+            this.pythonProcess.on('exit', (code, signal) => {
+                console.log(`[BOT] Python process exited with code ${code}`);
+                this.pythonProcess = null;
+            });
+
+            console.log('[BOT] 🐍 Python monitor started (PID: ' + this.pythonProcess.pid + ')');
+        } catch (error) {
+            console.error('[BOT] Failed to start Python monitor:', error.message);
+        }
+    }
+
+    /**
+     * Process certificate from SQLite bridge
+     */
+    async processCertificateFromBridge(message) {
+        try {
+            // Pass message through the listener's existing certificate handling logic
+            await this.listener.handleCertificateMessage(JSON.stringify(message));
+            
+            // Listener will emit cabal_detected events as needed
+        } catch (error) {
+            console.error('[BOT] Error processing certificate:', error.message);
+        }
     }
 
     /**
@@ -220,6 +290,9 @@ class TargetedListenerBot {
         console.log('║       Research → DNA Lock → Listen    ║');
         console.log('╚════════════════════════════════════════╝\n');
 
+        // Set up listener event handler
+        this.listener.on('cabal_detected', (alert) => this.handleCabalDetection(alert));
+
         // Phase 1: Research
         const researchOk = await this.runResearchPhase();
         if (!researchOk) {
@@ -234,7 +307,7 @@ class TargetedListenerBot {
             process.exit(1);
         }
 
-        // Phase 3: Real-Time Listener (optional - may fail in dev container)
+        // Phase 3: Real-Time Listener (Python bridge + SQLite)
         await this.runRealTimeListener();
 
         // Keep process alive even if listener failed (for testing)
@@ -243,7 +316,29 @@ class TargetedListenerBot {
 
     async stop() {
         this.isRunning = false;
-        this.listener.disconnect();
+        
+        // Stop bridge polling
+        if (this.bridge) {
+            await this.bridge.disconnect();
+        }
+
+        // Stop listener (legacy)
+        if (this.listener) {
+            this.listener.disconnect();
+        }
+
+        // Stop Python monitor process
+        if (this.pythonProcess) {
+            console.log('[BOT] Terminating Python monitor...');
+            this.pythonProcess.kill('SIGTERM');
+            // Give it 3 seconds to shut down gracefully
+            setTimeout(() => {
+                if (this.pythonProcess) {
+                    this.pythonProcess.kill('SIGKILL');
+                }
+            }, 3000);
+        }
+
         console.log('[BOT] Stopped.');
     }
 }

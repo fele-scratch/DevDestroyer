@@ -1,0 +1,38 @@
+{
+  "comment": "CertStream Monitor Configuration - Patterns for cabal detection",
+  "patterns": [
+    ".fun",
+    ".xyz",
+    ".club",
+    ".online",
+    ".download",
+    ".website",
+    ".mobi",
+    ".cc",
+    ".space"
+  ],
+  "excluded_patterns": [
+    "cloudflare.com",
+    "google",
+    "amazon",
+    "microsoft",
+    "github",
+    "stackoverflow",
+    "www.google",
+    "cdn.",
+    "api.",
+    "cdn-"
+  ],
+  "ssl_issuers": [
+    "Let's Encrypt"
+  ],
+  "suspicious_keywords": [
+    "phishing",
+    "clone",
+    "giveaway",
+    "verify",
+    "confirm",
+    "update",
+    "urgent"
+  ]
+}

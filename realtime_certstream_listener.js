@@ -245,25 +245,15 @@ class CertStreamRealTimeListener {
         // Extract from SAN (Subject Alternative Names)
         if (leafCert.extensions && leafCert.extensions.subjectAltName) {
             const sanList = leafCert.extensions.subjectAltName;
-            // Handle both array and string formats
-            if (Array.isArray(sanList)) {
-                sanList.forEach(san => {
-                    if (typeof san === 'string') {
-                        domains.add(san);
-                    }
-                });
-            } else if (typeof sanList === 'string') {
-                // If it's a string, try to parse DNS: entries and other patterns
-                const dnsMatches = sanList.match(/DNS:([^\s,]+)/g) || [];
-                dnsMatches.forEach(match => {
-                    const domain = match.replace('DNS:', '').trim();
-                    if (domain) domains.add(domain);
-                });
-            }
+            sanList.forEach(san => {
+                if (typeof san === 'string') {
+                    domains.add(san);
+                }
+            });
         }
 
-        // Extract from all_domains if available (this is most reliable)
-        if (leafCert.all_domains && Array.isArray(leafCert.all_domains)) {
+        // Extract from all_domains if available
+        if (leafCert.all_domains) {
             leafCert.all_domains.forEach(domain => domains.add(domain));
         }
 
@@ -437,7 +427,7 @@ class CertStreamRealTimeListener {
      */
     connect(pollInterval = 10000) {
         const CERTSTREAM_HTTP_URL = 'https://certstream.calidog.io/example.json';
-        let lastProcessedCertIndex = -1;  // Track by cert_index for deduplication
+        let lastProcessedTime = Date.now() / 1000;
         let isPolling = true;
 
         console.log(`[CertStream] Starting HTTP polling from ${CERTSTREAM_HTTP_URL}`);
@@ -455,12 +445,12 @@ class CertStreamRealTimeListener {
 
                 if (response.data && response.data.data) {
                     const certData = response.data.data;
-                    const certIndex = certData.cert_index || 0;
+                    const currentTime = certData.seen || (Date.now() / 1000);
 
-                    // Only process if this is a NEW certificate (not seen before)
-                    if (certIndex > lastProcessedCertIndex) {
+                    // Only process if this is a NEW certificate (seen after our last poll)
+                    if (currentTime > lastProcessedTime) {
                         this.messageCount++;
-                        lastProcessedCertIndex = certIndex;
+                        lastProcessedTime = currentTime;
 
                         // Log first certificate to confirm data flow
                         if (this.messageCount === 1) {
