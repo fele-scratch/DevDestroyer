@@ -34,5 +34,7 @@
     "confirm",
     "update",
     "urgent"
-  ]
+  ],
+  "pull_poll_interval_seconds": 30,
+  "pull_limit_per_pattern": 20
 }

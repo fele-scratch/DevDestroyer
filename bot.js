@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const EventEmitter = require('events');
-const PythonCertStreamBridge = require('./python_certstream_bridge');
 const CertStreamRealTimeListener = require('./realtime_certstream_listener');
 const ResearchMode = require('./research_mode');
 const CabalScraper = require('./cabal_scraper');
@@ -21,7 +20,6 @@ class TargetedListenerBot extends EventEmitter {
         super();
         this.research = new ResearchMode(WATCHLIST_FILE);
         this.listener = new CertStreamRealTimeListener();
-        this.bridge = null;
         this.pythonProcess = null;
         this.scraper = new CabalScraper();
         this.isRunning = false;
@@ -108,7 +106,7 @@ class TargetedListenerBot extends EventEmitter {
     }
 
     /**
-     * Phase 3: Real-Time Listener - Using Python Bridge with SQLite
+     * Phase 3: Real-Time Listener - Live stream relay from Python CertStream monitor
      */
     async runRealTimeListener() {
         console.log('=========================================');
@@ -118,30 +116,16 @@ class TargetedListenerBot extends EventEmitter {
         console.log('[BOT] 🤐 Silent mode: Alerts only on watchlist/pattern match\n');
 
         try {
-            // Start Python CertStream Monitor
-            console.log('[BOT] 🐍 Starting Python CertStream Monitor...');
-            this.startPythonMonitor();
+            // Start Python CertStream Monitor in LIVE mode only (no pull fallback)
+            const monitorMode = 'live';
+            console.log(`[BOT] 🐍 Starting Python CertStream Monitor (mode: ${monitorMode})...`);
+            this.startPythonMonitor(monitorMode);
 
-            // Create bridge to SQLite database
-            console.log('[BOT] 🌉 Initializing SQLite bridge...');
-            this.bridge = new PythonCertStreamBridge({
-                dbPath: path.join(__dirname, 'data', 'certstream.db'),
-                pollInterval: 5000,
-                onCertificate: (message) => this.processCertificateFromBridge(message)
-            });
-
-            // Connect to database
-            await this.bridge.connect();
-            console.log('[BOT] ✅ Connected to SQLite database');
-
-            // Start polling SQLite for new certificates
-            this.bridge.startPolling();
             this.isRunning = true;
-            console.log('[BOT] ✅ Initiated CertStream bridge connection. Waiting for matches...');
+            console.log('[BOT] ✅ Live CertStream pipeline started (direct event relay, no polling delay).');
             
         } catch (error) {
-            console.error('[BOT] ⚠️  Bridge initialization failed:', error.message);
-            console.log('[BOT] ℹ️  The listener will attempt to recover automatically.');
+            console.error('[BOT] ⚠️  Monitor initialization failed:', error.message);
             this.isRunning = false;
         }
 
@@ -151,19 +135,59 @@ class TargetedListenerBot extends EventEmitter {
     /**
      * Start Python CertStream Monitor as subprocess
      */
-    startPythonMonitor() {
+    startPythonMonitor(mode = 'live') {
         try {
             const scriptPath = path.join(__dirname, 'certstream_monitor.py');
             
-            this.pythonProcess = spawn('python3', [scriptPath], {
+            this.pythonProcess = spawn('python3', ['-u', scriptPath], {
+                env: { ...process.env, CERT_MONITOR_MODE: mode },
                 cwd: __dirname,
                 stdio: ['inherit', 'pipe', 'pipe'],
                 detached: false
             });
 
+            this.pythonStdoutBuffer = '';
             this.pythonProcess.stdout.on('data', (data) => {
                 process.stdout.write(data);
+                this.pythonStdoutBuffer += data.toString();
+                const lines = this.pythonStdoutBuffer.split('\n');
+                this.pythonStdoutBuffer = lines.pop();
+                for (const line of lines) {
+                    if (line.startsWith('__CERT_EVENT__')) {
+                        const raw = line.slice('__CERT_EVENT__'.length);
+                        try {
+                            const message = JSON.parse(raw);
+                            this.processCertificateFromBridge(message).catch(err => {
+                                console.error('[BOT] Error processing streamed cert event:', err.message);
+                            });
+                        } catch (error) {
+                            console.error('[BOT] Failed to parse streamed cert event:', error.message);
+                        }
+                    } else {
+                        process.stdout.write(line + '\n');
+                    }
+                }
             });
+
+            this.pythonProcess.stderr.on('data', (data) => {
+                process.stderr.write(data);                this.pythonStdoutBuffer += data.toString();
+                const lines = this.pythonStdoutBuffer.split('\n');
+                this.pythonStdoutBuffer = lines.pop();
+                for (const line of lines) {
+                    if (line.startsWith('__CERT_EVENT__')) {
+                        const raw = line.slice('__CERT_EVENT__'.length);
+                        try {
+                            const message = JSON.parse(raw);
+                            this.processCertificateFromBridge(message).catch(err => {
+                                console.error('[BOT] Error processing streamed cert event:', err.message);
+                            });
+                        } catch (error) {
+                            console.error('[BOT] Failed to parse streamed cert event:', error.message);
+                        }
+                    } else {
+                        process.stdout.write(line + '\n');
+                    }
+                }            });
 
             this.pythonProcess.stderr.on('data', (data) => {
                 process.stderr.write(data);
@@ -185,7 +209,7 @@ class TargetedListenerBot extends EventEmitter {
     }
 
     /**
-     * Process certificate from SQLite bridge
+     * Process certificate from streamed CertStream event
      */
     async processCertificateFromBridge(message) {
         try {
@@ -316,11 +340,6 @@ class TargetedListenerBot extends EventEmitter {
 
     async stop() {
         this.isRunning = false;
-        
-        // Stop bridge polling
-        if (this.bridge) {
-            await this.bridge.disconnect();
-        }
 
         // Stop listener (legacy)
         if (this.listener) {

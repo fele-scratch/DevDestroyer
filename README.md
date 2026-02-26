@@ -82,3 +82,15 @@ Refine Heuristics: Continuously update knownCabalIPs, knownCabalDomains, and dom
 
 This structured approach will allow for efficient development and deployment of the Cabal Detection Bot.
 
+Runtime note for Phase 3 (Cert Monitoring)
+
+- Phase 3 is now live-only: the Python monitor connects directly to CertStream websocket.
+- Each certificate event is relayed from Python to Node immediately over stdout (no SQLite polling delay).
+- SQLite is still used for persistence/logging, but processing path is direct-stream for lowest latency.
+
+Runtime note for Phase 3 (Cert Monitoring)
+
+- Phase 3 is now live-only: the Python monitor connects directly to CertStream websocket.
+- Each certificate event is relayed from Python to Node immediately over stdout (no SQLite polling delay).
+- SQLite is still used for persistence/logging, but processing path is direct-stream for lowest latency.
+

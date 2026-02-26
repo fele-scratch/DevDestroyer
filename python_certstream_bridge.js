@@ -72,6 +72,40 @@ class PythonCertStreamBridge {
                 } else {
                     console.log(`[SQLite Bridge] Connected to database: ${this.dbPath}`);
                     this.db.configure('busyTimeout', 5000);
+                    this.ensureSchema()
+                        .then(() => resolve())
+                        .catch(reject);
+                }
+            });
+        });
+    }
+
+    /**
+     * Ensure required schema exists (safe to call repeatedly)
+     */
+    ensureSchema() {
+        return new Promise((resolve, reject) => {
+            const schemaSql = `
+                CREATE TABLE IF NOT EXISTS certificates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cert_index INTEGER UNIQUE,
+                    domains TEXT,
+                    serialnumber TEXT,
+                    issuer TEXT,
+                    seen_timestamp REAL,
+                    stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    matched_pattern TEXT,
+                    processed INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_processed ON certificates(processed);
+                CREATE INDEX IF NOT EXISTS idx_seen ON certificates(seen_timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_cert_index ON certificates(cert_index DESC);
+            `;
+            this.db.exec(schemaSql, (err) => {
+                if (err) {
+                    console.error('[SQLite Bridge] Failed to ensure schema:', err.message);
+                    reject(err);
+                } else {
                     resolve();
                 }
             });
