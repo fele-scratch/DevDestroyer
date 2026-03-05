@@ -137,7 +137,7 @@ class TargetedListenerBot extends EventEmitter {
      */
     startPythonMonitor(mode = 'live') {
         try {
-            const scriptPath = path.join(__dirname, 'certstream_monitor.py');
+            const scriptPath = path.join(__dirname, 'certstream_poller.py');
             
             this.pythonProcess = spawn('python3', ['-u', scriptPath], {
                 env: { ...process.env, CERT_MONITOR_MODE: mode },

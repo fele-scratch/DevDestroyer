@@ -245,11 +245,18 @@ class CertStreamRealTimeListener {
         // Extract from SAN (Subject Alternative Names)
         if (leafCert.extensions && leafCert.extensions.subjectAltName) {
             const sanList = leafCert.extensions.subjectAltName;
-            sanList.forEach(san => {
-                if (typeof san === 'string') {
-                    domains.add(san);
-                }
-            });
+            if (Array.isArray(sanList)) {
+                sanList.forEach(san => {
+                    if (typeof san === 'string') {
+                        domains.add(san);
+                    }
+                });
+            } else if (typeof sanList === 'string') {
+                // Handle comma-separated string or other formats
+                sanList.split(',').forEach(san => {
+                    domains.add(san.trim().replace(/^DNS:/, ''));
+                });
+            }
         }
 
         // Extract from all_domains if available
