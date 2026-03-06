@@ -21,3 +21,12 @@ Thumbs.db
 # Logs
 logs/
 *.log
+__pycache__/
+*.pyc
+cabal_detections.jsonl
+cabal_detections_realtime.json
+data/
+test_heartbeat_only.js
+test_python_bridge.py
+target_watchlist.json
+seed_urls.txt
